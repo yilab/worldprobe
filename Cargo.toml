@@ -1,0 +1,21 @@
+[package]
+name = "worldprobe"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "The desktop inspector for .world packages: fold, validate, walk the history and its branches, watch the state trajectory, run the physics — worldgit with a viewport coming"
+repository = "https://github.com/yilab/worldprobe"
+keywords = ["openworldformat", "world", "inspector", "egui"]
+
+[dependencies]
+eframe = "0.36.2"
+serde_json = "1.0.151"
+
+# The format's Rust reference, until the format-only crates extract into
+# openworldformat/rust/ (that extraction is this app's job to trigger).
+[dependencies.localgpt-world-types]
+path = "../localgpt/crates/world-types"
+[dependencies.localgpt-world-sync]
+path = "../localgpt/crates/world-sync"
+[dependencies.localgpt-world-physics]
+path = "../localgpt/crates/world-physics"
