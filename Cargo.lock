@@ -1697,33 +1697,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "localgpt-world-physics"
-version = "0.3.6"
-dependencies = [
- "localgpt-world-sync",
- "localgpt-world-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "localgpt-world-sync"
-version = "0.3.6"
-dependencies = [
- "localgpt-world-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "localgpt-world-types"
-version = "0.3.6"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2213,6 +2186,14 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "openworldformat"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "orbclient"
@@ -4043,9 +4024,7 @@ name = "worldprobe"
 version = "0.1.0"
 dependencies = [
  "eframe",
- "localgpt-world-physics",
- "localgpt-world-sync",
- "localgpt-world-types",
+ "openworldformat",
  "serde_json",
 ]
 

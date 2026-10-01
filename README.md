@@ -14,12 +14,10 @@ the format's own Rust reference:
 | **Physics** | declared bodies (`ext-physics`), the 5 s simulation — contacts, bounces, resting |
 
 The app adds **no format semantics of its own**: the fold, validation,
-branching and physics all come from
-[LocalGPT](https://github.com/localgpt-app/localgpt)'s reference crates
-(`world-types`, `world-sync`, `world-physics`) via path dependencies.
-Those crates extract into `openworldformat/rust/` as format-only
-packages once a second Rust consumer needs them — this app is that
-consumer, and the extraction is its job to trigger.
+branching and physics all come from the format's own Rust reference —
+the `openworldformat` crate, extracted into the spec repo's `rust/`
+(this app's arrival was the extraction's trigger). A path dependency
+until the crate publishes to crates.io; a version range after.
 
 ## Build
 

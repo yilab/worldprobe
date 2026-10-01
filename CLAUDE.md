@@ -6,10 +6,9 @@ Guidance for Claude Code when working in this repository.
 
 worldprobe — the desktop inspector for Open World Format `.world`
 packages (fold, validate, history/branches, state, physics). egui
-frontend over the format's Rust reference crates, consumed by path from
-`../localgpt/crates/{world-types,world-sync,world-physics}` until they
-extract into `../openworldformat/rust/` (this app is the trigger for
-that extraction — see openworldformat/rust/README.md).
+frontend over the `openworldformat` crate (path dep on
+`../openworldformat/rust/` until it publishes to crates.io — flip to a
+version range the day it does).
 
 ## Rules
 

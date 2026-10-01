@@ -11,11 +11,8 @@ keywords = ["openworldformat", "world", "inspector", "egui"]
 eframe = "0.36.2"
 serde_json = "1.0.151"
 
-# The format's Rust reference, until the format-only crates extract into
-# openworldformat/rust/ (that extraction is this app's job to trigger).
-[dependencies.localgpt-world-types]
-path = "../localgpt/crates/world-types"
-[dependencies.localgpt-world-sync]
-path = "../localgpt/crates/world-sync"
-[dependencies.localgpt-world-physics]
-path = "../localgpt/crates/world-physics"
+# The format's Rust reference — extracted into openworldformat/rust/.
+# A path dep until the crate publishes to crates.io; flip to a version
+# range the day it does.
+[dependencies.openworldformat]
+path = "../openworldformat/rust"

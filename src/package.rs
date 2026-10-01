@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use localgpt_world_sync::WorldDoc;
-use localgpt_world_sync::oplog::OpLogEntry;
-use localgpt_world_sync::session::{SessionOp, fold_log, fold_path};
-use localgpt_world_types as wt;
-use wt::EditOp;
+use openworldformat as wt;
+use openworldformat::physics::{self as physics_ref, PhysicsWorld, SimOptions, Simulation};
+use openworldformat::session::SessionOp;
+use openworldformat::state::{StateDoc, fold_state};
+use openworldformat::{EditOp, OpLogEntry, WorldDoc, fold_log, fold_path};
 
 /// A loaded package: the base document, the log, the fold, the history,
 /// the state trajectory, the validation verdict, and — when the world
@@ -47,9 +47,9 @@ pub struct Package {
     /// Named refs from `package.json` (ref → entry id).
     pub refs: BTreeMap<String, String>,
     /// The physics run, when the world declares bodies.
-    pub physics: Option<localgpt_world_physics::Simulation>,
+    pub physics: Option<Simulation>,
     /// Bodies the world declares (for the physics header).
-    pub physics_world: localgpt_world_physics::PhysicsWorld,
+    pub physics_world: PhysicsWorld,
 }
 
 /// The synthesized identity of one entry (`id`, `parent`): its own when
@@ -65,64 +65,6 @@ fn identified(entries: &[OpLogEntry]) -> Vec<(String, Option<String>)> {
         previous = Some(id);
     }
     out
-}
-
-/// Fold the state: declared fields set (null resets the initial),
-/// map subkeys set and remove, undeclared keys carried and named.
-/// The whole log, linear — per-tip folding is the branch view's fold.
-fn fold_state(
-    initial: &BTreeMap<String, serde_json::Value>,
-    types: &BTreeMap<String, String>,
-    entries: &[OpLogEntry],
-) -> (BTreeMap<String, serde_json::Value>, Vec<String>) {
-    let mut values = initial.clone();
-    let mut undeclared: Vec<String> = Vec::new();
-    for entry in entries {
-        for op in &entry.ops {
-            let SessionOp::State(record) = op else {
-                continue;
-            };
-            for (key, value) in &record.state {
-                if types.contains_key(key) {
-                    match value {
-                        serde_json::Value::Null => {
-                            values.insert(key.clone(), initial[key].clone());
-                        }
-                        v => {
-                            values.insert(key.clone(), v.clone());
-                        }
-                    }
-                    continue;
-                }
-                if let Some((base, inner)) = key.split_once('.')
-                    && types.get(base).map(String::as_str) == Some("map")
-                    && let Some(serde_json::Value::Object(map)) = values.get_mut(base)
-                {
-                    match value {
-                        serde_json::Value::Null => {
-                            map.remove(inner);
-                        }
-                        v => {
-                            map.insert(inner.to_string(), v.clone());
-                        }
-                    }
-                    continue;
-                }
-                match value {
-                    serde_json::Value::Null => {
-                        values.remove(key);
-                    }
-                    v => {
-                        values.insert(key.clone(), v.clone());
-                        if !undeclared.contains(key) {
-                            undeclared.push(key.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    (values, undeclared)
 }
 
 /// The base document as a `WorldDoc`: entities spawned through the
@@ -169,35 +111,21 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         }
     }
 
-    let (state_initial, state_types) = read("state.json")
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .map(|doc| {
-            let mut initial = BTreeMap::new();
-            let mut types = BTreeMap::new();
-            if let Some(fields) = doc.get("fields").and_then(|f| f.as_object()) {
-                for (name, field) in fields {
-                    if let Some(kind) = field.get("type").and_then(|t| t.as_str()) {
-                        types.insert(name.clone(), kind.to_string());
-                        let default = match kind {
-                            "int" | "float" => serde_json::json!(0),
-                            "bool" => serde_json::json!(false),
-                            "string" => serde_json::json!(""),
-                            "map" => serde_json::json!({}),
-                            "list" => serde_json::json!([]),
-                            _ => serde_json::Value::Null,
-                        };
-                        initial.insert(
-                            name.clone(),
-                            field.get("initial").cloned().unwrap_or(default),
-                        );
-                    }
-                }
-            }
-            (initial, types)
-        })
+    let state_doc: StateDoc = read("state.json")
+        .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-
-    let (state_values, undeclared) = fold_state(&state_initial, &state_types, &entries);
+    let state_initial = state_doc
+        .fields
+        .iter()
+        .map(|(name, field)| (name.clone(), field.initial_value()))
+        .collect();
+    let state_types = state_doc
+        .fields
+        .iter()
+        .map(|(name, field)| (name.clone(), field.kind.clone()))
+        .collect();
+    let folded_state = fold_state(&state_doc, &entries);
+    let (state_values, undeclared) = (folded_state.values, folded_state.undeclared);
 
     let package_json =
         read("package.json").and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -231,10 +159,9 @@ pub fn load(dir: &Path) -> Result<Package, String> {
     let base = base_doc(&manifest)?;
     let fold = fold_log(&base, &entries).map_err(|e| e.to_string());
 
-    let physics_world = localgpt_world_physics::collect_physics(&manifest);
-    let physics = (!physics_world.dynamic.is_empty()).then(|| {
-        localgpt_world_physics::simulate(&manifest, &localgpt_world_physics::SimOptions::default())
-    });
+    let physics_world = physics_ref::collect_physics(&manifest);
+    let physics = (!physics_world.dynamic.is_empty())
+        .then(|| physics_ref::simulate(&manifest, &SimOptions::default()));
 
     Ok(Package {
         dir: dir.to_path_buf(),

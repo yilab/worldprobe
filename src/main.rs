@@ -8,7 +8,7 @@
 mod package;
 
 use eframe::egui;
-use localgpt_world_types as wt;
+use openworldformat as wt;
 use package::Package;
 
 fn main() -> eframe::Result {
