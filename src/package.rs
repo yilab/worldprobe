@@ -242,6 +242,24 @@ impl Package {
                     EditOp::RemoveAudioEmitter { name, .. } => {
                         format!("Edit · RemoveAudioEmitter {name}")
                     }
+                    EditOp::ModifyWorld { patch } => {
+                        let mut fields: Vec<&str> = Vec::new();
+                        for (name, set) in [
+                            ("meta", patch.meta.is_some()),
+                            ("environment", patch.environment.is_some()),
+                            ("camera", patch.camera.is_some()),
+                            ("avatar", patch.avatar.is_some()),
+                            ("tours", patch.tours.is_some()),
+                            ("soundtrack", patch.soundtrack.is_some()),
+                            ("ambience", patch.ambience.is_some()),
+                            ("creations", patch.creations.is_some()),
+                        ] {
+                            if set {
+                                fields.push(name);
+                            }
+                        }
+                        format!("Edit · ModifyWorld · {}", fields.join(", "))
+                    }
                     EditOp::Batch { ops } => format!("Edit · Batch ({} ops)", ops.len()),
                 },
                 SessionOp::Tool(record) => format!("Tool · {} · {:?}", record.tool, record.phase),
@@ -264,7 +282,7 @@ impl Package {
                         record.clock.playing, record.clock.position_s
                     )
                 }
-                SessionOp::Merge(record) => format!("Merge · from {}", record.branch),
+                SessionOp::Merge(record) => format!("Merge · from {}", record.merge.branch),
                 SessionOp::Extension(record) => format!("Extension · {}", record.name),
             })
             .collect()
