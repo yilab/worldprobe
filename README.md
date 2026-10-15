@@ -10,6 +10,7 @@ the format's own Rust reference:
 | **Entities** | the folded document: id, name, shape, component flags (M/L/B/T/~/A), extension fields |
 | **Log** | every entry with its ops classified — edits, tool calls, visitor input, state deltas, clocks, merges, extension ops |
 | **Branches** | the history as a tree: tips marked, refs annotated, click a tip to fold to it |
+| **Diff** | the world at any two points of the history — the base, any entry, or `manifest.json` as written — compared as JSON: entities added, removed, changed (which fields, old → new), world fields changed |
 | **State** | declared fields with types, initials and folded values; undeclared keys carried and named |
 | **Physics** | declared bodies (`ext-physics`), the 5 s simulation — contacts, bounces, resting |
 

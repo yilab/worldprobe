@@ -19,7 +19,8 @@ pub struct Package {
     pub dir: PathBuf,
     /// `package.json`, when present (L3 metadata).
     pub package_json: Option<serde_json::Value>,
-    /// The base world document (`manifest.json`).
+    /// `manifest.json` as written: the head, the state at the tip of
+    /// `main` (spec/package.md, "Head-first").
     pub manifest: wt::WorldManifest,
     /// The session log (`ops.jsonl`), in file order. Torn trailing
     /// lines are skipped and counted, per the spec's tolerance rule.
@@ -38,7 +39,9 @@ pub struct Package {
     pub issues: Vec<wt::ValidationIssue>,
     /// The document at the last entry, or why the fold refused.
     pub fold: Result<WorldDoc, String>,
-    /// The base document as a `WorldDoc`, for per-tip folds.
+    /// The base document — `snapshots/base.json`, the oldest state the
+    /// log folds from, or the manifest itself when the package has no
+    /// snapshot — for the fold and the per-tip folds.
     pub base: WorldDoc,
     /// Entry id → children ids (branching histories).
     pub children: BTreeMap<String, Vec<String>>,
@@ -67,19 +70,21 @@ fn identified(entries: &[OpLogEntry]) -> Vec<(String, Option<String>)> {
     out
 }
 
-/// The base document as a `WorldDoc`: entities spawned through the
-/// fold's own path so id/name maps stay honest.
-fn base_doc(manifest: &wt::WorldManifest) -> Result<WorldDoc, String> {
-    let mut doc = WorldDoc::new(manifest.meta.name.as_str());
-    doc.environment = manifest.environment.clone();
-    doc.camera = manifest.camera.clone();
-    doc.avatar = manifest.avatar.clone();
-    doc.tours = manifest.tours.clone();
-    for entity in &manifest.entities {
-        doc.apply(&EditOp::spawn(entity.clone()))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(doc)
+/// The base document the log folds from: `snapshots/base.json` when the
+/// package has one, else `manifest.json` itself — a log with no edits
+/// folds from the head (spec/package.md, "Head-first"). Built by the
+/// reference's own constructor, so the base carries every field a
+/// manifest holds and the fold's state is always a whole manifest.
+fn base_doc(snapshot: Option<&str>, manifest: &wt::WorldManifest) -> Result<WorldDoc, String> {
+    let doc = match snapshot {
+        Some(text) => {
+            let base: wt::WorldManifest = serde_json::from_str(text)
+                .map_err(|e| format!("{}: {e}", wt::package::BASE_SNAPSHOT))?;
+            WorldDoc::from_manifest(&base)
+        }
+        None => WorldDoc::from_manifest(manifest),
+    };
+    doc.map_err(|e| format!("base: {e}"))
 }
 
 /// Load a package directory. `manifest.json` is required; everything
@@ -142,21 +147,20 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         .unwrap_or_default();
 
     let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut has_parent: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (id, parent) in identified(&entries) {
-        if let Some(parent) = &parent {
-            children.entry(parent.clone()).or_default().push(id.clone());
-            has_parent.insert(id.clone());
+        if let Some(parent) = parent {
+            children.entry(parent).or_default().push(id);
         }
     }
+    // A tip is an entry nobody names as parent.
     let tips: Vec<String> = identified(&entries)
         .into_iter()
         .map(|(id, _)| id)
-        .filter(|id| !has_parent.contains(id))
+        .filter(|id| !children.contains_key(id))
         .collect();
 
     let issues = wt::validate_manifest(&manifest, &wt::WorldLimits::default());
-    let base = base_doc(&manifest)?;
+    let base = base_doc(read(wt::package::BASE_SNAPSHOT).as_deref(), &manifest)?;
     let fold = fold_log(&base, &entries).map_err(|e| e.to_string());
 
     let physics_world = physics_ref::collect_physics(&manifest);
@@ -217,6 +221,28 @@ impl Package {
     /// Fold to one tip: the document at that point of the history.
     pub fn fold_to(&self, tip: &str) -> Result<(WorldDoc, Vec<String>), String> {
         fold_path(&self.base, &self.entries, Some(tip)).map_err(|e| e.to_string())
+    }
+
+    /// The head entry: the one `main` names when the log has it, else
+    /// the last entry in file order (spec/package.md, "Head-first");
+    /// `None` when the log is empty.
+    pub fn head(&self) -> Option<String> {
+        let ids = identified(&self.entries);
+        self.refs
+            .get("main")
+            .filter(|main| ids.iter().any(|(id, _)| id == *main))
+            .cloned()
+            .or_else(|| ids.last().map(|(id, _)| id.clone()))
+    }
+
+    /// An entry's parent by the fold's identity rule — its own, else the
+    /// previous entry in file order; `None` for a root, whose parent is
+    /// the base.
+    pub fn parent_of(&self, id: &str) -> Option<String> {
+        identified(&self.entries)
+            .into_iter()
+            .find(|(entry, _)| entry == id)
+            .and_then(|(_, parent)| parent)
     }
 
     /// One line per op, classified — the log view's detail rows.

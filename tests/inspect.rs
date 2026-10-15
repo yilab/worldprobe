@@ -8,8 +8,10 @@
 use std::path::PathBuf;
 
 fn sibling(relative: &str) -> Option<PathBuf> {
+    // The siblings sit next to this repository (`../songworld`,
+    // `../openworldformat`), as the README says.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../")
+        .join("..")
         .join(relative);
     path.is_dir().then_some(path)
 }
@@ -64,6 +66,85 @@ fn inspects_the_spec_examples() {
     );
 }
 
+#[test]
+fn diffs_the_spec_examples_history() {
+    let Some(root) = sibling("openworldformat") else {
+        return;
+    };
+    let world_at = |package: &package_lib::Package, tip: Option<&str>| -> serde_json::Value {
+        let manifest = match tip {
+            None => package.base.to_manifest(),
+            Some(tip) => package
+                .fold_to(tip)
+                .unwrap_or_else(|e| panic!("{tip}: {e}"))
+                .0
+                .to_manifest(),
+        };
+        serde_json::to_value(manifest).unwrap()
+    };
+    // The fork: base → e2 raises the flag and the banner; the two runs
+    // after it change no entity.
+    let fork = crate_load(&root.join("examples/speedrun-fork"));
+    let raised = diff_lib::diff_worlds(&world_at(&fork, None), &world_at(&fork, Some("e2")));
+    assert_eq!(
+        raised
+            .entities
+            .iter()
+            .map(|e| (e.id.as_str(), e.name.as_str(), e.change))
+            .collect::<Vec<_>>(),
+        vec![
+            ("20", "checkpoint_flag", diff_lib::Change::Added),
+            ("21", "banner", diff_lib::Change::Added),
+        ]
+    );
+    assert_eq!(
+        raised
+            .world
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["next_entity_id"]
+    );
+    assert!(
+        diff_lib::diff_worlds(&world_at(&fork, Some("e3")), &world_at(&fork, Some("e4")))
+            .is_empty()
+    );
+    // The castle: main keeps the garden, the variant digs the moat.
+    let castle = crate_load(&root.join("examples/forked-exploration"));
+    let variant = diff_lib::diff_worlds(
+        &world_at(&castle, Some("e3")),
+        &world_at(&castle, Some("e5")),
+    );
+    assert_eq!(
+        variant
+            .entities
+            .iter()
+            .map(|e| (e.id.as_str(), e.change))
+            .collect::<Vec<_>>(),
+        vec![
+            ("102", diff_lib::Change::Removed),
+            ("103", diff_lib::Change::Added),
+        ]
+    );
+    // Every example's fold to main is its manifest.json, read the way
+    // the spec's equality reads them (spec/package.md, "Head-first").
+    for pkg in [
+        "examples/hello-world",
+        "examples/speedrun-fork",
+        "examples/forked-exploration",
+        "examples/the-drop-test",
+    ] {
+        let package = crate_load(&root.join(pkg));
+        let head = package.head().unwrap_or_else(|| panic!("{pkg}: no head"));
+        let written = serde_json::to_value(&package.manifest).unwrap();
+        let diff = diff_lib::diff_worlds(&world_at(&package, Some(&head)), &written);
+        assert!(
+            diff.is_empty(),
+            "{pkg}: the fold to {head} is not manifest.json: {diff:#?}"
+        );
+    }
+}
+
 // The package module lives in the binary; the test needs it as a lib.
 // Until it earns extraction (the whole point of this app), load via the
 // same code path by including it.
@@ -71,6 +152,12 @@ fn inspects_the_spec_examples() {
 #[allow(dead_code)]
 #[path = "../src/package.rs"]
 mod package_lib;
+
+// The diff module likewise: pure functions over JSON, included so the
+// two sides of a fold can be compared here.
+#[allow(dead_code)]
+#[path = "../src/diff.rs"]
+mod diff_lib;
 
 fn crate_load(dir: &std::path::Path) -> package_lib::Package {
     package_lib::load(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()))

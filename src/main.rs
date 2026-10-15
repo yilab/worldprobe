@@ -1,12 +1,15 @@
 //! worldprobe — the desktop inspector for `.world` packages.
 //!
-//! Fold, validate, walk the history and its branches, watch the state
-//! trajectory, run the physics. The format semantics are the Rust
-//! reference's (world-types, world-sync, world-physics); this app only
-//! points them at a directory and shows what they say.
+//! Fold, validate, walk the history and its branches, compare any two
+//! points of it, watch the state trajectory, run the physics. The format
+//! semantics are the Rust reference's (world-types, world-sync,
+//! world-physics); this app only points them at a directory and shows
+//! what they say.
 
+mod diff;
 mod package;
 
+use diff::{Change, FieldDiff, WorldDiff};
 use eframe::egui;
 use openworldformat as wt;
 use package::Package;
@@ -33,6 +36,7 @@ struct WorldProbe {
     tab: Tab,
     selected_entry: Option<usize>,
     selected_tip: Option<String>,
+    diff: DiffView,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -42,8 +46,66 @@ enum Tab {
     Entities,
     Log,
     Branches,
+    Diff,
     State,
     Physics,
+}
+
+/// A point of the history the Diff tab compares: the base, the fold to
+/// an entry, or `manifest.json` as written (the head).
+#[derive(Default, Clone, PartialEq, Debug)]
+enum DiffPoint {
+    #[default]
+    Base,
+    Entry(String),
+    Manifest,
+}
+
+/// The Diff tab's state: the two points, the selectors' rows, and the
+/// diff for the pair it was last computed for — both sides fold once
+/// per selection, not once per frame.
+#[derive(Default)]
+struct DiffView {
+    from: DiffPoint,
+    to: DiffPoint,
+    points: Vec<(DiffPoint, String)>,
+    computed: Option<(DiffPoint, DiffPoint, Result<WorldDiff, String>)>,
+}
+
+impl DiffView {
+    /// The selectors for a package, set to the last change: the head
+    /// entry against its parent (the base when it has none).
+    fn for_package(package: &Package) -> Self {
+        let mut points = vec![(DiffPoint::Base, "base".to_string())];
+        for (n, entry) in package.entries.iter().enumerate() {
+            let id = entry.id.clone().unwrap_or_else(|| format!("line-{n}"));
+            let mark = if package.tips.contains(&id) {
+                "●"
+            } else {
+                " "
+            };
+            let summary = Package::op_summary(entry).join(" · ");
+            let label = format!("{mark} {id} · rev {} · {summary}", entry.revision);
+            points.push((DiffPoint::Entry(id), label));
+        }
+        points.push((
+            DiffPoint::Manifest,
+            "manifest.json (the head as written)".to_string(),
+        ));
+        let head = package.head();
+        let from = head
+            .as_deref()
+            .and_then(|head| package.parent_of(head))
+            .map(DiffPoint::Entry)
+            .unwrap_or_default();
+        let to = head.map(DiffPoint::Entry).unwrap_or(DiffPoint::Manifest);
+        Self {
+            from,
+            to,
+            points,
+            computed: None,
+        }
+    }
 }
 
 impl eframe::App for WorldProbe {
@@ -89,6 +151,7 @@ impl eframe::App for WorldProbe {
                 ui.selectable_value(&mut self.tab, Tab::Entities, "Entities");
                 ui.selectable_value(&mut self.tab, Tab::Log, "Log");
                 ui.selectable_value(&mut self.tab, Tab::Branches, "Branches");
+                ui.selectable_value(&mut self.tab, Tab::Diff, "Diff");
                 ui.selectable_value(&mut self.tab, Tab::State, "State");
                 ui.selectable_value(&mut self.tab, Tab::Physics, "Physics");
             });
@@ -98,6 +161,7 @@ impl eframe::App for WorldProbe {
                 Tab::Entities => Self::entities(ui, package),
                 Tab::Log => Self::log(ui, package, &mut self.selected_entry),
                 Tab::Branches => Self::branches(ui, package, &mut self.selected_tip),
+                Tab::Diff => Self::diff(ui, package, &mut self.diff),
                 Tab::State => Self::state(ui, package),
                 Tab::Physics => Self::physics(ui, package),
             }
@@ -110,9 +174,11 @@ impl WorldProbe {
         self.path = path.clone();
         self.selected_entry = None;
         self.selected_tip = None;
+        self.diff = DiffView::default();
         match package::load(std::path::Path::new(&path)) {
             Ok(package) => {
                 self.error = None;
+                self.diff = DiffView::for_package(&package);
                 self.package = Some(package);
             }
             Err(error) => {
@@ -144,7 +210,7 @@ impl WorldProbe {
                 .as_ref()
                 .map(|doc| doc.len().to_string())
                 .unwrap_or_else(|e| format!("fold refused: {e}"));
-            ui.label(format!("{} → {}", package.manifest.entities.len(), folded));
+            ui.label(format!("{} → {}", package.base.len(), folded));
             ui.end_row();
             ui.label("Log entries");
             let mut line = package.entries.len().to_string();
@@ -461,7 +527,7 @@ impl WorldProbe {
             return;
         }
         ui.label(format!(
-            "{} dynamic · {} static · {} kinematic (base manifest; log-spawned bodies not yet folded in)",
+            "{} dynamic · {} static · {} kinematic (manifest.json, the head as written)",
             world.dynamic.len(),
             world.statics.len(),
             world.kinematic.len()
@@ -495,5 +561,215 @@ impl WorldProbe {
                 ui.end_row();
             }
         });
+    }
+
+    fn diff(ui: &mut egui::Ui, package: &Package, view: &mut DiffView) {
+        ui.horizontal(|ui| {
+            ui.label("from");
+            Self::point_selector(ui, "diff-from", &view.points, &mut view.from);
+            if ui.button("⇄").on_hover_text("Swap the two sides").clicked() {
+                std::mem::swap(&mut view.from, &mut view.to);
+            }
+            ui.label("to");
+            Self::point_selector(ui, "diff-to", &view.points, &mut view.to);
+        });
+        ui.add_space(4.0);
+        let stale = view
+            .computed
+            .as_ref()
+            .is_none_or(|(from, to, _)| from != &view.from || to != &view.to);
+        if stale {
+            let result = match (
+                Self::world_at(package, &view.from),
+                Self::world_at(package, &view.to),
+            ) {
+                (Ok(from), Ok(to)) => Ok(diff::diff_worlds(&from, &to)),
+                (from, to) => Err([("from", from.err()), ("to", to.err())]
+                    .into_iter()
+                    .filter_map(|(side, error)| error.map(|error| format!("{side}: {error}")))
+                    .collect::<Vec<_>>()
+                    .join("\n")),
+            };
+            view.computed = Some((view.from.clone(), view.to.clone(), result));
+        }
+        let Some((_, _, result)) = &view.computed else {
+            return;
+        };
+        let diff = match result {
+            Ok(diff) => diff,
+            Err(error) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 100), format!("✗ {error}"));
+                return;
+            }
+        };
+        ui.label(format!(
+            "{} entities added · {} removed · {} changed · {} world field{} changed",
+            diff.count(Change::Added),
+            diff.count(Change::Removed),
+            diff.count(Change::Changed),
+            diff.world.len(),
+            if diff.world.len() == 1 { "" } else { "s" }
+        ));
+        ui.add_space(4.0);
+        if diff.is_empty() {
+            ui.label("No differences — the world is the same at both points.");
+            return;
+        }
+        egui::ScrollArea::both().show(ui, |ui| {
+            // A diff line extends the grid sideways rather than wrapping;
+            // the area scrolls.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            egui::Grid::new("diff")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.monospace("id");
+                    ui.monospace("name");
+                    ui.monospace("change");
+                    ui.monospace("fields");
+                    ui.end_row();
+                    for entity in &diff.entities {
+                        ui.monospace(entity.id.as_str());
+                        ui.monospace(entity.name.as_str());
+                        ui.colored_label(Self::change_color(entity.change), entity.change.label());
+                        ui.monospace(
+                            entity
+                                .fields
+                                .iter()
+                                .map(FieldDiff::line)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                        ui.end_row();
+                    }
+                    for field in &diff.world {
+                        ui.monospace("world");
+                        ui.monospace(field.path.as_str());
+                        let change = field.change();
+                        ui.colored_label(Self::change_color(change), change.label());
+                        ui.monospace(field.values());
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    /// One side's selector: the base, every entry (tips marked ●), the
+    /// manifest as written.
+    fn point_selector(
+        ui: &mut egui::Ui,
+        salt: &str,
+        points: &[(DiffPoint, String)],
+        current: &mut DiffPoint,
+    ) {
+        let selected = points
+            .iter()
+            .find(|(point, _)| point == current)
+            .map(|(_, label)| label.as_str())
+            .unwrap_or("—");
+        egui::ComboBox::from_id_salt(salt)
+            .width(400.0)
+            .truncate()
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (point, label) in points {
+                    ui.selectable_value(current, point.clone(), label.as_str());
+                }
+            });
+    }
+
+    /// The world at one point, as the manifest the fold writes — JSON,
+    /// for the diff.
+    fn world_at(package: &Package, point: &DiffPoint) -> Result<serde_json::Value, String> {
+        let value = match point {
+            DiffPoint::Base => serde_json::to_value(package.base.to_manifest()),
+            DiffPoint::Entry(id) => serde_json::to_value(package.fold_to(id)?.0.to_manifest()),
+            DiffPoint::Manifest => serde_json::to_value(&package.manifest),
+        };
+        value.map_err(|e| e.to_string())
+    }
+
+    fn change_color(change: Change) -> egui::Color32 {
+        match change {
+            Change::Added => egui::Color32::from_rgb(120, 200, 120),
+            Change::Removed => egui::Color32::from_rgb(230, 120, 100),
+            Change::Changed => egui::Color32::from_rgb(220, 180, 100),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Diff tab drawn headless against the spec's fork, when the
+    /// sibling checkout is there (absent, it skips — by design): the
+    /// defaults name the last change on main, drawing folds both sides,
+    /// a new selection refolds, and a tip the log lacks says so.
+    #[test]
+    fn the_diff_tab_draws_the_fork() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../openworldformat/examples/speedrun-fork");
+        if !dir.is_dir() {
+            return;
+        }
+        let package = package::load(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let mut view = DiffView::for_package(&package);
+        assert_eq!(view.from, DiffPoint::Entry("e1".into()));
+        assert_eq!(view.to, DiffPoint::Entry("e2".into()));
+        assert_eq!(view.points.len(), package.entries.len() + 2);
+        assert_eq!(view.points[0].1, "base");
+        assert!(
+            view.points[2]
+                .1
+                .starts_with("  e2 · rev 2 · Edit · SpawnEntity 21 (banner)"),
+            "{}",
+            view.points[2].1
+        );
+        assert!(
+            view.points[3].1.starts_with("● e3 · rev 2 · Input · kai"),
+            "{}",
+            view.points[3].1
+        );
+
+        let ctx = egui::Context::default();
+        let draw = |view: &mut DiffView| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                WorldProbe::diff(ui, &package, view);
+            });
+            // No painter here: the font atlas delta is dropped on purpose.
+            output.textures_delta.clear();
+        };
+
+        // e1 → e2: the banner.
+        draw(&mut view);
+        let Some((_, _, Ok(diff))) = &view.computed else {
+            panic!("no diff: {:?}", view.computed);
+        };
+        assert_eq!(diff.count(Change::Added), 1);
+        assert_eq!(diff.entities[0].name, "banner");
+
+        // base → manifest.json: everything the log did.
+        view.from = DiffPoint::Base;
+        view.to = DiffPoint::Manifest;
+        draw(&mut view);
+        let Some((_, _, Ok(diff))) = &view.computed else {
+            panic!("no diff: {:?}", view.computed);
+        };
+        assert_eq!(diff.count(Change::Added), 2);
+        assert_eq!(diff.world.len(), 1, "{:?}", diff.world);
+        assert_eq!(diff.world[0].path, "next_entity_id");
+
+        // A tip the log lacks: the fold refuses, the tab says which side.
+        view.to = DiffPoint::Entry("e9".into());
+        draw(&mut view);
+        let refused = match &view.computed {
+            Some((_, _, Err(error))) => error.clone(),
+            other => panic!("expected a refusal: {other:?}"),
+        };
+        assert!(
+            refused.starts_with("to: ") && refused.contains("e9"),
+            "{refused}"
+        );
     }
 }
