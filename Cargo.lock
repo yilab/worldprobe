@@ -2189,9 +2189,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openworldformat"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45cfbeff2f06ebd7df9907fd134942fe9f745ec4c8efddf44be31c959dafccad"
+checksum = "113bd637080fe99820f49a1c351b7fb5b25f126ed4afafdc291df79abf39235e"
 dependencies = [
  "serde",
  "serde_json",

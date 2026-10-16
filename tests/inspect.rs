@@ -145,6 +145,57 @@ fn diffs_the_spec_examples_history() {
     }
 }
 
+#[test]
+fn lists_a_behavior_whose_target_is_gone() {
+    // The crate's validation (openworldformat 0.3.6) reaches the issues
+    // list: a `look_at` whose target is not in the world is a warning, not
+    // a refusal — the world still folds.
+    let Some(root) = sibling("openworldformat") else {
+        return;
+    };
+    let mut manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("examples/hello-world/manifest.json"))
+            .expect("the spec's hello-world manifest"),
+    )
+    .expect("hello-world parses");
+    let id = manifest["next_entity_id"].as_u64().unwrap_or(500);
+    let gone = id + 1;
+    let mut watcher = manifest["entities"][0].clone();
+    watcher["id"] = serde_json::json!(id);
+    watcher["name"] = serde_json::json!("watcher");
+    watcher["behaviors"] = serde_json::json!([{"LookAt": {"target": gone}}]);
+    manifest["entities"]
+        .as_array_mut()
+        .expect("entities")
+        .push(watcher);
+    manifest["next_entity_id"] = serde_json::json!(id + 1);
+
+    let dir = std::env::temp_dir().join(format!("worldprobe-dangling-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch package dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).expect("manifest serializes"),
+    )
+    .expect("manifest.json");
+    std::fs::write(dir.join("ops.jsonl"), b"").expect("ops.jsonl");
+    let package = crate_load(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        package.fold.is_ok(),
+        "a dangling target does not refuse the fold"
+    );
+    assert!(
+        package.issues.iter().any(|i| {
+            matches!(i.severity, openworldformat::Severity::Warning)
+                && i.message.contains("look_at")
+                && i.message.contains(&gone.to_string())
+        }),
+        "no dangling-target warning among {:?}",
+        package.issues
+    );
+}
+
 // The package module lives in the binary; the test needs it as a lib.
 // Until it earns extraction (the whole point of this app), load via the
 // same code path by including it.
