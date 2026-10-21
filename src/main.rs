@@ -299,6 +299,7 @@ impl WorldProbe {
                                     wt::Shape::Tetrahedron { .. } => "Tetrahedron",
                                     wt::Shape::Icosahedron { .. } => "Icosahedron",
                                     wt::Shape::Wedge { .. } => "Wedge",
+                                    wt::Shape::Prism { .. } => "Prism",
                                 })
                                 .unwrap_or("—")
                                 .to_string(),
