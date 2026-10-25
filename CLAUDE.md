@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 worldprobe — the desktop inspector for Open World Format `.world`
 packages (fold, validate, history/branches, state, physics). egui
-frontend over the `openworldformat` crate from crates.io (`0.3.5`; a
+frontend over the `openworldformat` crate from crates.io (`0.4.0`; a
 `[patch.crates-io]` entry pointing at `../openworldformat/rust/` builds
 against the sibling checkout instead).
 
