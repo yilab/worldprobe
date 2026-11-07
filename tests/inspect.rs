@@ -196,6 +196,60 @@ fn lists_a_behavior_whose_target_is_gone() {
     );
 }
 
+#[test]
+fn keeps_a_behavior_kind_the_crate_does_not_know() {
+    // Since openworldformat 0.5.0 a behavior kind the crate does not know
+    // reads as `BehaviorDef::Other`, folds through and writes back as it
+    // came, where it used to refuse the whole manifest — so the inspector
+    // opens a world from a producer whose behaviors it has never heard of.
+    let Some(root) = sibling("openworldformat") else {
+        return;
+    };
+    let mut manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("examples/hello-world/manifest.json"))
+            .expect("the spec's hello-world manifest"),
+    )
+    .expect("hello-world parses");
+    let id = manifest["next_entity_id"].as_u64().unwrap_or(500);
+    let wobble = serde_json::json!({"Wobble": {"how": 3}});
+    let mut wobbler = manifest["entities"][0].clone();
+    wobbler["id"] = serde_json::json!(id);
+    wobbler["name"] = serde_json::json!("wobbler");
+    wobbler["behaviors"] = serde_json::json!([wobble]);
+    manifest["entities"]
+        .as_array_mut()
+        .expect("entities")
+        .push(wobbler);
+    manifest["next_entity_id"] = serde_json::json!(id + 1);
+
+    let dir = std::env::temp_dir().join(format!("worldprobe-unknown-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch package dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).expect("manifest serializes"),
+    )
+    .expect("manifest.json");
+    std::fs::write(dir.join("ops.jsonl"), b"").expect("ops.jsonl");
+    let package = crate_load(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        package.fold.is_ok(),
+        "an unknown kind does not refuse the fold"
+    );
+    let kept = package
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.name.0 == "wobbler")
+        .expect("the wobbler is in the manifest");
+    assert_eq!(
+        serde_json::to_value(&kept.behaviors).expect("behaviors serialize"),
+        serde_json::json!([wobble]),
+        "the kind writes back as it came"
+    );
+}
+
 // The package module lives in the binary; the test needs it as a lib.
 // Until it earns extraction (the whole point of this app), load via the
 // same code path by including it.
