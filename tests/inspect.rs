@@ -1,6 +1,6 @@
 //! The inspector inspects what the ecosystem actually ships: when the
-//! sibling checkouts are present (the murky-swamp layout, or a local
-//! clone arrangement), load their packages and prove the fold, the
+//! sibling checkouts are present (cloned side by side in one folder, as
+//! the README describes), load their packages and prove the fold, the
 //! history, and the state all read. CI with no siblings skips — the
 //! packages' own repositories test them there; this test is for the
 //! desk where they sit side by side.
