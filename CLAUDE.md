@@ -4,14 +4,18 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-worldprobe — the desktop inspector for Open World Format `.world`
-packages (fold, validate, history/branches, state, physics). egui
-frontend over the `openworldformat` crate from crates.io (`0.5.0`; a
+worldprobe — the read-only desktop inspector for Open World Format
+`.world` packages (fold, validate, history/branches, diff, state,
+physics). egui frontend over the `openworldformat` crate from crates.io (`0.5.0`; a
 `[patch.crates-io]` entry pointing at `../openworldformat/rust/` builds
 against the sibling checkout instead).
 
 ## Rules
 
+- Read-only: worldprobe never writes into a package, and grows no
+  viewport and no editor. Drawing a world is a viewer's job, changing
+  one an authority's (LocalGPT's app, `localgpt world`); requests for
+  either belong in those projects.
 - No format semantics in this repo: parsing, folding, validation,
   history and physics belong to the reference crates. worldprobe loads
   directories and draws what the reference says. If a format behavior

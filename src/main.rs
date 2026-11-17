@@ -1,10 +1,10 @@
-//! worldprobe — the desktop inspector for `.world` packages.
+//! worldprobe — the read-only inspector for `.world` packages.
 //!
 //! Fold, validate, walk the history and its branches, compare any two
 //! points of it, watch the state trajectory, run the physics. The format
-//! semantics are the Rust reference's (world-types, world-sync,
-//! world-physics); this app only points them at a directory and shows
-//! what they say.
+//! semantics are the Rust reference's (the `openworldformat` crate); this
+//! app only points them at a directory and shows what they say, and
+//! never writes.
 
 mod diff;
 mod package;

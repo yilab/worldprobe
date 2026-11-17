@@ -1,8 +1,8 @@
 # worldprobe
 
-**The desktop inspector for `.world` packages** — worldgit with a
-viewport coming. Drop a package folder on the window and see, through
-the format's own Rust reference:
+**The read-only inspector for `.world` packages** — worldgit for
+looking. Drop a package folder on the window and see, through the
+format's own Rust reference:
 
 | Tab | What it shows |
 |---|---|
@@ -17,8 +17,8 @@ the format's own Rust reference:
 The app adds **no format semantics of its own**: the fold, validation,
 branching and physics all come from the format's own Rust reference —
 the `openworldformat` crate, extracted into the spec repo's `rust/`
-(this app's arrival was the extraction's trigger). A path dependency
-until the crate publishes to crates.io; a version range after.
+(this app's arrival was the extraction's trigger) and ridden from
+crates.io.
 
 ## Build
 
@@ -38,13 +38,14 @@ and proves the fold, the history and the state read; CI without
 siblings skips, because those packages test themselves in their own
 repositories.
 
-## Roadmap
+## Scope
 
-- **Viewport** — a Bevy pane rendering the folded document (the
-  ecosystem's `world-bevy` is the prior art).
-- **Editor** — append-ops editing: spawn/modify/delete write to
-  `ops.jsonl`, undo appends inverses, save compacts. The format's
-  native editing story, demonstrated. Comes last on purpose.
+Read-only, and staying that way. In the spec's terms worldprobe is a
+session reader (spec/package.md, "Head-first"): it folds, checks and
+shows, and never writes a package. Drawing a world is a viewer's job
+and changing one an authority's — LocalGPT's desktop app renders and
+edits, `localgpt world` is the command line — so this repository grows
+no viewport and no editor.
 
 ## License
 

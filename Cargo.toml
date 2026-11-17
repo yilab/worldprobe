@@ -3,7 +3,7 @@ name = "worldprobe"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "The desktop inspector for .world packages: fold, validate, walk the history and its branches, watch the state trajectory, run the physics — worldgit with a viewport coming"
+description = "The read-only inspector for .world packages: fold, validate, walk the history and its branches, compare any two points of it, watch the state trajectory, run the physics"
 repository = "https://github.com/yilab/worldprobe"
 keywords = ["openworldformat", "world", "inspector", "egui"]
 
