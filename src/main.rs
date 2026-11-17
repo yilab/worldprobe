@@ -196,12 +196,23 @@ impl DiffView {
             "manifest.json (the head as written)".to_string(),
         ));
         let head = package.head.clone();
-        let from = head
-            .as_deref()
-            .and_then(|head| package.parent_of(head))
-            .map(DiffPoint::Entry)
-            .unwrap_or_default();
-        let to = head.map(DiffPoint::Entry).unwrap_or(DiffPoint::Manifest);
+        // When manifest.json isn't the fold to the head, that is the
+        // difference worth opening on; otherwise the last change.
+        let drifted = package.head_drift.as_ref().is_some_and(|d| !d.is_empty());
+        let (from, to) = if drifted {
+            (
+                head.map(DiffPoint::Entry).unwrap_or_default(),
+                DiffPoint::Manifest,
+            )
+        } else {
+            (
+                head.as_deref()
+                    .and_then(|head| package.parent_of(head))
+                    .map(DiffPoint::Entry)
+                    .unwrap_or_default(),
+                head.map(DiffPoint::Entry).unwrap_or(DiffPoint::Manifest),
+            )
+        };
         Self {
             from,
             to,
@@ -423,6 +434,10 @@ impl WorldProbe {
         });
 
         ui.add_space(8.0);
+        ui.heading("Consistency");
+        Self::consistency(ui, package);
+
+        ui.add_space(8.0);
         ui.heading("Validation");
         let errors = package
             .issues
@@ -440,6 +455,57 @@ impl WorldProbe {
                 ui.monospace(format!("{mark} {}", issue.message));
             }
         });
+    }
+
+    /// Whether the package agrees with itself: `manifest.json` against the
+    /// fold to the head, and the files against the hashes `package.json`
+    /// records. Asset hashes are not checked here yet.
+    fn consistency(ui: &mut egui::Ui, package: &Package) {
+        let at = package.head.as_deref().unwrap_or("the base");
+        match &package.head_drift {
+            None => {
+                ui.colored_label(
+                    WARNING,
+                    "? manifest.json can't be checked: the fold to the head refused (above)",
+                );
+            }
+            Some(drift) if drift.is_empty() => {
+                ui.label(format!("✓ manifest.json is the fold to {at}"));
+            }
+            Some(drift) => {
+                ui.colored_label(
+                    ERROR,
+                    format!(
+                        "✗ manifest.json isn't the fold to {at}: {} entities and {} world fields differ — the Diff tab opens on them",
+                        drift.entities.len(),
+                        drift.world.len()
+                    ),
+                );
+            }
+        }
+        if package.integrity.is_empty() {
+            ui.weak("package.json records no integrity hashes");
+        }
+        for check in &package.integrity {
+            let (file, key) = (check.file, check.key);
+            if check.holds() {
+                ui.label(format!(
+                    "✓ {file} holds the bytes package.json names ({key})"
+                ));
+            } else if check.actual.is_none() {
+                ui.colored_label(
+                    ERROR,
+                    format!("✗ {file} is missing, and package.json names its bytes ({key})"),
+                );
+            } else {
+                ui.colored_label(
+                    ERROR,
+                    format!(
+                        "✗ {file} isn't the bytes package.json names ({key}): written since, by hand or by a checkout"
+                    ),
+                );
+            }
+        }
     }
 
     fn entities(ui: &mut egui::Ui, package: &Package) {
@@ -899,6 +965,108 @@ mod tests {
             .collect();
         std::fs::write(dir.join("ops.jsonl"), log).expect("ops.jsonl");
         dir
+    }
+
+    /// Every tab, drawn headless for every package at hand — the siblings'
+    /// when they are there, and scratch ones with a torn line, a corrupt
+    /// line and a parent the log doesn't hold — so a tab that panics fails
+    /// here rather than in a window.
+    #[test]
+    fn every_tab_draws_every_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut dirs: Vec<PathBuf> = [
+            "openworldformat/examples/hello-world",
+            "openworldformat/examples/speedrun-fork",
+            "openworldformat/examples/forked-exploration",
+            "openworldformat/examples/the-drop-test",
+            "songworld/world",
+        ]
+        .iter()
+        .map(|pkg| root.join(pkg))
+        .filter(|dir| dir.is_dir())
+        .collect();
+        let entry = |id: &str, parent: Option<&str>| {
+            let parent = parent
+                .map(|p| format!(",\"parent\":\"{p}\""))
+                .unwrap_or_default();
+            format!("{{\"revision\":0,\"ops\":[],\"id\":\"{id}\"{parent}}}\n")
+        };
+        let mut scratches = Vec::new();
+        for (name, log) in [
+            ("draw-torn", format!("{}{{\"rev", entry("e1", None))),
+            (
+                "draw-corrupt",
+                format!("{}{{\"rev\n{}", entry("e1", None), entry("e3", None)),
+            ),
+            (
+                "draw-orphan",
+                format!("{}{}", entry("e1", None), entry("e2", Some("gone"))),
+            ),
+        ] {
+            let dir = scratch(name, 0);
+            std::fs::write(dir.join("ops.jsonl"), log).expect("ops.jsonl");
+            scratches.push(dir.clone());
+            dirs.push(dir);
+        }
+
+        for dir in &dirs {
+            let package = package::load(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            let mut selected = (!package.entries.is_empty()).then_some(0);
+            let mut tip = package.head.clone();
+            let mut view = DiffView::for_package(&package);
+            let ctx = egui::Context::default();
+            for tab in 0..7 {
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| match tab {
+                    0 => WorldProbe::overview(ui, &package),
+                    1 => WorldProbe::entities(ui, &package),
+                    2 => WorldProbe::log(ui, &package, &mut selected),
+                    3 => WorldProbe::branches(ui, &package, &mut tip),
+                    4 => WorldProbe::diff(ui, &package, &mut view),
+                    5 => WorldProbe::state(ui, &package),
+                    _ => WorldProbe::physics(ui, &package),
+                });
+                // No painter here: the font atlas delta is dropped on purpose.
+                output.textures_delta.clear();
+            }
+        }
+        for dir in scratches {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_drifted_head_opens_the_diff_on_it() {
+        // No log, a base that is the empty world, and a manifest.json
+        // holding a lamp: the head isn't the fold, and the Diff tab opens
+        // on exactly that.
+        let dir = scratch("drift", 0);
+        std::fs::create_dir_all(dir.join("snapshots")).expect("snapshots/");
+        std::fs::write(
+            dir.join(wt::package::BASE_SNAPSHOT),
+            serde_json::to_vec(&wt::WorldDoc::new("probe").to_manifest()).expect("base"),
+        )
+        .expect("the base snapshot");
+        let mut head = wt::WorldDoc::new("probe");
+        head.apply(&wt::EditOp::spawn(wt::WorldEntity::new(1, "lamp")))
+            .expect("a lamp");
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&head.to_manifest()).expect("manifest"),
+        )
+        .expect("manifest.json");
+        let package = package::load(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            package
+                .head_drift
+                .as_ref()
+                .is_some_and(|drift| drift.count(Change::Added) == 1),
+            "{:?}",
+            package.head_drift
+        );
+        let view = DiffView::for_package(&package);
+        assert_eq!(view.from, DiffPoint::Base);
+        assert_eq!(view.to, DiffPoint::Manifest);
     }
 
     #[test]

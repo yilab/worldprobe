@@ -85,7 +85,7 @@ fn diffs_the_spec_examples_history() {
     // The fork: base → e2 raises the flag and the banner; the two runs
     // after it change no entity.
     let fork = crate_load(&root.join("examples/speedrun-fork"));
-    let raised = diff_lib::diff_worlds(&world_at(&fork, None), &world_at(&fork, Some("e2")));
+    let raised = diff::diff_worlds(&world_at(&fork, None), &world_at(&fork, Some("e2")));
     assert_eq!(
         raised
             .entities
@@ -93,8 +93,8 @@ fn diffs_the_spec_examples_history() {
             .map(|e| (e.id.as_str(), e.name.as_str(), e.change))
             .collect::<Vec<_>>(),
         vec![
-            ("20", "checkpoint_flag", diff_lib::Change::Added),
-            ("21", "banner", diff_lib::Change::Added),
+            ("20", "checkpoint_flag", diff::Change::Added),
+            ("21", "banner", diff::Change::Added),
         ]
     );
     assert_eq!(
@@ -106,12 +106,11 @@ fn diffs_the_spec_examples_history() {
         vec!["next_entity_id"]
     );
     assert!(
-        diff_lib::diff_worlds(&world_at(&fork, Some("e3")), &world_at(&fork, Some("e4")))
-            .is_empty()
+        diff::diff_worlds(&world_at(&fork, Some("e3")), &world_at(&fork, Some("e4"))).is_empty()
     );
     // The castle: main keeps the garden, the variant digs the moat.
     let castle = crate_load(&root.join("examples/forked-exploration"));
-    let variant = diff_lib::diff_worlds(
+    let variant = diff::diff_worlds(
         &world_at(&castle, Some("e3")),
         &world_at(&castle, Some("e5")),
     );
@@ -121,10 +120,7 @@ fn diffs_the_spec_examples_history() {
             .iter()
             .map(|e| (e.id.as_str(), e.change))
             .collect::<Vec<_>>(),
-        vec![
-            ("102", diff_lib::Change::Removed),
-            ("103", diff_lib::Change::Added),
-        ]
+        vec![("102", diff::Change::Removed), ("103", diff::Change::Added),]
     );
     // Every example's fold to main is its manifest.json, read the way
     // the spec's equality reads them (spec/package.md, "Head-first").
@@ -140,7 +136,7 @@ fn diffs_the_spec_examples_history() {
             .clone()
             .unwrap_or_else(|| panic!("{pkg}: no head"));
         let written = serde_json::to_value(&package.manifest).unwrap();
-        let diff = diff_lib::diff_worlds(&world_at(&package, Some(&head)), &written);
+        let diff = diff::diff_worlds(&world_at(&package, Some(&head)), &written);
         assert!(
             diff.is_empty(),
             "{pkg}: the fold to {head} is not manifest.json: {diff:#?}"
@@ -365,6 +361,94 @@ fn the_head_is_mains_tip_and_a_dangling_main_says_so() {
     assert!(head.get(103).is_none(), "the moat is on the variant only");
 }
 
+#[test]
+fn every_sibling_package_agrees_with_itself() {
+    // What the ecosystem ships: each head is the fold to main, and each
+    // file holds the bytes package.json names.
+    let mut packages = Vec::new();
+    if let Some(root) = sibling("openworldformat") {
+        for pkg in [
+            "examples/hello-world",
+            "examples/speedrun-fork",
+            "examples/forked-exploration",
+            "examples/the-drop-test",
+        ] {
+            packages.push(root.join(pkg));
+        }
+    }
+    if let Some(root) = sibling("songworld") {
+        packages.push(root.join("world"));
+        packages.push(root.join("world-recording"));
+    }
+    for dir in packages {
+        let package = crate_load(&dir);
+        let drift = package
+            .head_drift
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: the fold refused", dir.display()));
+        assert!(drift.is_empty(), "{}: {drift:#?}", dir.display());
+        assert!(
+            !package.integrity.is_empty(),
+            "{}: no hashes recorded",
+            dir.display()
+        );
+        for check in &package.integrity {
+            assert!(check.holds(), "{}: {check:?}", dir.display());
+        }
+    }
+}
+
+#[test]
+fn a_package_that_disagrees_with_itself_says_where() {
+    // The history holds nothing, yet manifest.json has a lamp the base
+    // doesn't; package.json names bytes neither file holds, and a log
+    // that isn't there.
+    let dir = scratch(
+        "disagrees",
+        "",
+        Some(r#"{"world_sha256": "00", "log_sha256": "00"}"#),
+    );
+    std::fs::remove_file(dir.join("ops.jsonl")).expect("no log after all");
+    std::fs::create_dir_all(dir.join("snapshots")).expect("snapshots/");
+    std::fs::write(
+        dir.join(openworldformat::package::BASE_SNAPSHOT),
+        serde_json::to_vec(&openworldformat::WorldDoc::new("probe").to_manifest())
+            .expect("base serializes"),
+    )
+    .expect("the base snapshot");
+    let mut head = openworldformat::WorldDoc::new("probe");
+    head.apply(&openworldformat::EditOp::spawn(
+        openworldformat::WorldEntity::new(1, "lamp"),
+    ))
+    .expect("a lamp");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&head.to_manifest()).expect("manifest serializes"),
+    )
+    .expect("manifest.json");
+    let package = crate_load(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let drift = package
+        .head_drift
+        .as_ref()
+        .expect("the fold holds, so the head is checked");
+    assert_eq!(drift.count(diff::Change::Added), 1, "{drift:#?}");
+    assert_eq!(drift.entities[0].name, "lamp");
+    let world = package
+        .integrity
+        .iter()
+        .find(|check| check.key == "world_sha256")
+        .expect("world_sha256 is recorded");
+    assert!(!world.holds() && world.actual.is_some(), "{world:?}");
+    let log = package
+        .integrity
+        .iter()
+        .find(|check| check.key == "log_sha256")
+        .expect("log_sha256 is recorded");
+    assert!(!log.holds() && log.actual.is_none(), "{log:?}");
+}
+
 // The package module lives in the binary; the test needs it as a lib.
 // Until it earns extraction (the whole point of this app), load via the
 // same code path by including it.
@@ -374,10 +458,11 @@ fn the_head_is_mains_tip_and_a_dangling_main_says_so() {
 mod package_lib;
 
 // The diff module likewise: pure functions over JSON, included so the
-// two sides of a fold can be compared here.
+// two sides of a fold can be compared here — and named `diff`, as in the
+// binary, because the package module reads the head check through it.
 #[allow(dead_code)]
 #[path = "../src/diff.rs"]
-mod diff_lib;
+mod diff;
 
 fn crate_load(dir: &std::path::Path) -> package_lib::Package {
     package_lib::load(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()))

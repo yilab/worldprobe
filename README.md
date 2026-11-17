@@ -6,7 +6,7 @@ format's own Rust reference:
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | schema version vs the reference, base → head entity counts, the head (`main`, else the last entry), the log — a torn last line skipped, a corrupt one named — `package.json` metadata, validation verdict |
+| **Overview** | schema version vs the reference, base → head entity counts, the head (`main`, else the last entry), the log — a torn last line skipped, a corrupt one named — `package.json` metadata; whether the package agrees with itself (`manifest.json` against the fold to the head, the files against the hashes `package.json` records); the validation verdict |
 | **Entities** | the document at the head, the fold of the path to it: id, name, shape, component flags (M/L/B/T/~/A), extension fields |
 | **Log** | every entry with its ops classified — edits, tool calls, visitor input, state deltas, clocks, merges, extension ops |
 | **Branches** | the history as a tree: tips marked, refs annotated, click a tip to fold to it |

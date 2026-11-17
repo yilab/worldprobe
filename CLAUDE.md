@@ -6,9 +6,10 @@ Guidance for Claude Code when working in this repository.
 
 worldprobe — the read-only desktop inspector for Open World Format
 `.world` packages (fold, validate, history/branches, diff, state,
-physics). egui frontend over the `openworldformat` crate from crates.io (`0.5.0`; a
-`[patch.crates-io]` entry pointing at `../openworldformat/rust/` builds
-against the sibling checkout instead).
+physics). egui frontend over the `openworldformat` crate from crates.io
+(`0.5.1`; a `[patch.crates-io]` entry pointing at
+`../openworldformat/rust/` builds against the sibling checkout instead —
+committed while 0.5.1 is unpublished, and removed once it is).
 
 ## Rules
 
@@ -20,9 +21,10 @@ against the sibling checkout instead).
   history and physics belong to the reference crates. worldprobe loads
   directories and draws what the reference says. If a format behavior
   is missing, fix it upstream, not here.
-- The package module is included by the integration test via
-  `#[path = "../src/package.rs"]`; if it grows a dependency on egui,
-  extract it to a lib target instead.
+- The package and diff modules are included by the integration test via
+  `#[path = "../src/…"]`, the diff module as `diff`, because the package
+  module reads its head check through `crate::diff`. If either grows a
+  dependency on egui, extract them to a lib target instead.
 - egui moves fast: 0.36 renamed `App::update` → `App::ui`, unified the
   panel types (`egui::Panel::top/left`), and made dropped files trait
   objects. Check the vendored source in `~/.cargo/registry` before

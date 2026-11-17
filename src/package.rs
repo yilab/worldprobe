@@ -11,9 +11,35 @@ use openworldformat::session::{SessionMeta, SessionOp};
 use openworldformat::state::{StateDoc, fold_state};
 use openworldformat::{EditOp, OpLogEntry, WorldDoc, fold_path};
 
+use crate::diff::{WorldDiff, diff_worlds};
+
+/// One integrity hash `package.json` records (spec/package.md,
+/// "package.json"): the SHA-256 of a file as the authority last wrote it.
+#[derive(Debug, Clone)]
+pub struct Integrity {
+    /// The `package.json` member: `world_sha256` or `log_sha256`.
+    pub key: &'static str,
+    /// The file it names.
+    pub file: &'static str,
+    /// The hash recorded.
+    pub recorded: String,
+    /// The file's hash as it is now; `None` when the file isn't there.
+    pub actual: Option<String>,
+}
+
+impl Integrity {
+    /// Whether the file still holds the bytes `package.json` names.
+    pub fn holds(&self) -> bool {
+        self.actual
+            .as_deref()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(&self.recorded))
+    }
+}
+
 /// A loaded package: the base document, the log, its history, the fold
-/// to the head, the state trajectory, the validation verdict, and — when
-/// the world declares bodies — a physics run.
+/// to the head and whether `manifest.json` is it, the integrity hashes,
+/// the state trajectory, the validation verdict, and — when the world
+/// declares bodies — a physics run.
 pub struct Package {
     /// The directory this package was loaded from.
     pub dir: PathBuf,
@@ -53,6 +79,13 @@ pub struct Package {
     /// The document at the head — the fold of the path to it — or why
     /// the fold refused.
     pub fold: Result<WorldDoc, String>,
+    /// Where `manifest.json` and the fold to the head disagree, read by
+    /// the spec's equality (spec/package.md, "Head-first"): empty when the
+    /// head holds, `None` when the fold refused.
+    pub head_drift: Option<WorldDiff>,
+    /// The integrity hashes `package.json` records, against the files as
+    /// they are now.
+    pub integrity: Vec<Integrity>,
     /// The base document — `snapshots/base.json`, the oldest state the
     /// log folds from, or the manifest itself when the package has no
     /// snapshot — for the fold and the per-tip folds.
@@ -155,6 +188,34 @@ pub fn load(dir: &Path) -> Result<Package, String> {
             .map_err(|e| e.to_string()),
         None => Ok(base.clone()),
     };
+    // Session readers MAY check that the fold to main is manifest.json,
+    // equal as worlds (spec/package.md, "Head-first") — the diff's rule.
+    let head_drift = fold.as_ref().ok().and_then(|doc| {
+        let folded = serde_json::to_value(doc.to_manifest()).ok()?;
+        let written = serde_json::to_value(&manifest).ok()?;
+        Some(diff_worlds(&folded, &written))
+    });
+    // Integrity hashes, when present, SHOULD be checked before trusting a
+    // package from a third party (spec/package.md, "Integrity and
+    // tolerance").
+    let integrity = [
+        ("world_sha256", "manifest.json"),
+        ("log_sha256", "ops.jsonl"),
+    ]
+    .into_iter()
+    .filter_map(|(key, file)| {
+        let recorded = package_json.as_ref()?.get(key)?.as_str()?.to_string();
+        let actual = std::fs::read(dir.join(file))
+            .ok()
+            .map(|bytes| wt::sha256_hex(&bytes));
+        Some(Integrity {
+            key,
+            file,
+            recorded,
+            actual,
+        })
+    })
+    .collect();
 
     let physics_world = physics_ref::collect_physics(&manifest);
     let physics = (!physics_world.dynamic.is_empty())
@@ -176,6 +237,8 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         tips,
         head,
         fold,
+        head_drift,
+        integrity,
         base,
         refs,
         physics,
