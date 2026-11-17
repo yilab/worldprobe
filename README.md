@@ -23,11 +23,14 @@ crates.io.
 ## Build
 
 ```bash
-cargo run    # macOS/Linux/Windows; egui needs no system deps beyond the usual
+cargo run                           # macOS/Linux/Windows; egui needs no system deps beyond the usual
+cargo run -- ../songworld/world     # open a package at start
 ```
 
-Drop a `.world` directory on the window (or type its path). Try the
-sibling repositories' packages: `../songworld/world`,
+Drop a `.world` directory on the window, type its path, or name it on
+the command line. An open package is read again when its files change,
+so you can watch an authority write it. Try the sibling repositories'
+packages: `../songworld/world`,
 `../openworldformat/examples/speedrun-fork` — the one with two tips.
 
 ## Tests

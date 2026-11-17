@@ -9,12 +9,40 @@
 mod diff;
 mod package;
 
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
 use diff::{Change, FieldDiff, WorldDiff};
 use eframe::egui;
 use openworldformat as wt;
 use package::Package;
 
+const USAGE: &str = "\
+usage: worldprobe [PACKAGE]
+
+The read-only inspector for .world packages. PACKAGE is a package folder
+to open at start; without one, drop a folder on the window or type its
+path. An open package is read again whenever its files change.";
+
 fn main() -> eframe::Result {
+    let mut args = std::env::args_os().skip(1);
+    let package = args.next();
+    match package.as_ref().and_then(|arg| arg.to_str()) {
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("worldprobe {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ if args.next().is_some() => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+        _ => {}
+    }
+    let package = package.map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
@@ -24,7 +52,13 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "worldprobe",
         options,
-        Box::new(|_cc| Ok(Box::new(WorldProbe::default()))),
+        Box::new(move |_cc| {
+            let mut probe = WorldProbe::default();
+            if let Some(dir) = package {
+                probe.open(dir.display().to_string());
+            }
+            Ok(Box::new(probe))
+        }),
     )
 }
 
@@ -37,6 +71,71 @@ struct WorldProbe {
     selected_entry: Option<usize>,
     selected_tip: Option<String>,
     diff: DiffView,
+    watch: Option<Watch>,
+}
+
+/// How often an open package's files are looked at for a change.
+const WATCH_EVERY: Duration = Duration::from_millis(500);
+
+/// The files an authority writes, and the declaration beside them: a
+/// change to the package is a change to one of these.
+const WATCHED: [&str; 5] = [
+    "ops.jsonl",
+    "package.json",
+    "manifest.json",
+    wt::package::BASE_SNAPSHOT,
+    "state.json",
+];
+
+/// The watched files as they stand on disk: each one's length and
+/// modification time, or `None` while it isn't there.
+type Stamp = Vec<Option<(u64, SystemTime)>>;
+
+fn stamp(dir: &Path) -> Stamp {
+    WATCHED
+        .iter()
+        .map(|name| {
+            let meta = std::fs::metadata(dir.join(name)).ok()?;
+            Some((
+                meta.len(),
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ))
+        })
+        .collect()
+}
+
+/// Watching the open package: its files as they stood when it was read,
+/// and a change seen but not yet settled.
+struct Watch {
+    stamp: Stamp,
+    checked: Instant,
+    settling: Option<Stamp>,
+}
+
+impl Watch {
+    fn from(stamp: Stamp) -> Self {
+        Self {
+            stamp,
+            checked: Instant::now(),
+            settling: None,
+        }
+    }
+
+    /// Whether the files as they stand now call for a fresh read. A change
+    /// is read once it holds still for one more look, so an authority's
+    /// writes — the entry, then `package.json`, then the manifest — are
+    /// read together rather than one at a time.
+    fn settled(&mut self, now: Stamp) -> bool {
+        if now == self.stamp {
+            self.settling = None;
+            false
+        } else if self.settling.as_ref() == Some(&now) {
+            true
+        } else {
+            self.settling = Some(now);
+            false
+        }
+    }
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -115,6 +214,7 @@ impl eframe::App for WorldProbe {
             let path = file.path();
             self.open(path.display().to_string());
         }
+        self.watch_for_changes(ui.ctx());
         egui::Panel::top("bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Package");
@@ -127,6 +227,7 @@ impl eframe::App for WorldProbe {
                 if let Some(package) = &self.package {
                     ui.separator();
                     ui.monospace(package.dir.display().to_string());
+                    ui.weak("· read again when its files change");
                 }
             });
         });
@@ -175,10 +276,14 @@ impl WorldProbe {
         self.selected_entry = None;
         self.selected_tip = None;
         self.diff = DiffView::default();
-        match package::load(std::path::Path::new(&path)) {
+        self.watch = None;
+        let dir = Path::new(&path);
+        let before = stamp(dir);
+        match package::load(dir) {
             Ok(package) => {
                 self.error = None;
                 self.diff = DiffView::for_package(&package);
+                self.watch = Some(Watch::from(before));
                 self.package = Some(package);
             }
             Err(error) => {
@@ -186,6 +291,53 @@ impl WorldProbe {
                 self.package = None;
             }
         }
+    }
+
+    /// Look at the open package's files every [`WATCH_EVERY`], and read it
+    /// again once a change has settled.
+    fn watch_for_changes(&mut self, ctx: &egui::Context) {
+        let (Some(package), Some(watch)) = (&self.package, &mut self.watch) else {
+            return;
+        };
+        ctx.request_repaint_after(WATCH_EVERY);
+        if watch.checked.elapsed() < WATCH_EVERY {
+            return;
+        }
+        watch.checked = Instant::now();
+        if watch.settled(stamp(&package.dir)) {
+            let dir = package.dir.clone();
+            self.reload(&dir);
+        }
+    }
+
+    /// Read the open package again, keeping the tab and whatever was
+    /// selected wherever it still exists. A package that no longer loads
+    /// leaves the last good read on screen and says why.
+    fn reload(&mut self, dir: &Path) {
+        let before = stamp(dir);
+        self.watch = Some(Watch::from(before));
+        let package = match package::load(dir) {
+            Ok(package) => package,
+            Err(error) => {
+                self.error = Some(format!("reload: {error}"));
+                return;
+            }
+        };
+        self.error = None;
+        if self
+            .selected_entry
+            .is_some_and(|n| n >= package.entries.len())
+        {
+            self.selected_entry = None;
+        }
+        let mut diff = DiffView::for_package(&package);
+        let exists = |point: &DiffPoint| diff.points.iter().any(|(p, _)| p == point);
+        if exists(&self.diff.from) && exists(&self.diff.to) {
+            diff.from = self.diff.from.clone();
+            diff.to = self.diff.to.clone();
+        }
+        self.diff = diff;
+        self.package = Some(package);
     }
 
     fn overview(ui: &mut egui::Ui, package: &Package) {
@@ -702,6 +854,68 @@ impl WorldProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package the test may write to: an empty world and a log of
+    /// history-only entries, so the manifest is its own base.
+    fn scratch(name: &str, entries: usize) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("worldprobe-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch package dir");
+        let manifest = wt::WorldDoc::new("probe").to_manifest();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("manifest serializes"),
+        )
+        .expect("manifest.json");
+        let log: String = (0..entries)
+            .map(|n| format!("{{\"revision\":0,\"ops\":[],\"timestamp_ms\":{n}}}\n"))
+            .collect();
+        std::fs::write(dir.join("ops.jsonl"), log).expect("ops.jsonl");
+        dir
+    }
+
+    #[test]
+    fn a_change_is_read_once_it_settles_and_the_view_survives_it() {
+        use std::io::Write as _;
+        let dir = scratch("watch", 1);
+        let mut probe = WorldProbe::default();
+        probe.open(dir.display().to_string());
+        assert_eq!(probe.package.as_ref().map(|p| p.entries.len()), Some(1));
+        probe.tab = Tab::Log;
+        probe.selected_entry = Some(0);
+
+        // An authority appends: the change is seen at one look, and read
+        // at the next if it held still.
+        let mut watch = Watch::from(stamp(&dir));
+        assert!(!watch.settled(stamp(&dir)), "nothing changed");
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("ops.jsonl"))
+            .expect("the log opens for append");
+        writeln!(log, "{{\"revision\":0,\"ops\":[]}}").expect("an entry appends");
+        assert!(!watch.settled(stamp(&dir)), "seen, not yet read");
+        assert!(watch.settled(stamp(&dir)), "it held still: read it");
+
+        probe.reload(&dir);
+        assert_eq!(probe.package.as_ref().map(|p| p.entries.len()), Some(2));
+        assert!(probe.tab == Tab::Log, "the tab stays");
+        assert_eq!(probe.selected_entry, Some(0), "the selection stays");
+        assert!(probe.error.is_none());
+
+        // A read that fails leaves the last good one on screen.
+        std::fs::write(dir.join("manifest.json"), "{").expect("a broken manifest");
+        probe.reload(&dir);
+        assert_eq!(probe.package.as_ref().map(|p| p.entries.len()), Some(2));
+        assert!(
+            probe
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("reload: ")),
+            "{:?}",
+            probe.error
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The Diff tab drawn headless against the spec's fork, when the
     /// sibling checkout is there (absent, it skips — by design): the
