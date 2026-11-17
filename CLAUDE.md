@@ -31,4 +31,7 @@ against the sibling checkout instead).
   `cargo fmt`, and `cargo test` green before reporting completion.
 - The sibling-package tests skip when `../songworld` or
   `../openworldformat` are absent — that is by design, not a bug.
+- CI: `ci.yml` runs fmt and clippy (Linux) and `cargo test --locked` on
+  Linux, macOS and Windows; `release.yml` drafts a GitHub release with
+  five targets' binaries on a `vX.Y.Z` tag that matches `Cargo.toml`.
 - License: Apache-2.0.
