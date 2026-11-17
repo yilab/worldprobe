@@ -6,16 +6,17 @@ format's own Rust reference:
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | schema version vs the reference, base → head entity counts, log stats, torn lines, `package.json` metadata, validation verdict |
-| **Entities** | the folded document: id, name, shape, component flags (M/L/B/T/~/A), extension fields |
+| **Overview** | schema version vs the reference, base → head entity counts, the head (`main`, else the last entry), the log — a torn last line skipped, a corrupt one named — `package.json` metadata, validation verdict |
+| **Entities** | the document at the head, the fold of the path to it: id, name, shape, component flags (M/L/B/T/~/A), extension fields |
 | **Log** | every entry with its ops classified — edits, tool calls, visitor input, state deltas, clocks, merges, extension ops |
 | **Branches** | the history as a tree: tips marked, refs annotated, click a tip to fold to it |
 | **Diff** | the world at any two points of the history — the base, any entry, or `manifest.json` as written — compared as JSON: entities added, removed, changed (which fields, old → new), world fields changed |
 | **State** | declared fields with types, initials and folded values; undeclared keys carried and named |
 | **Physics** | declared bodies (`ext-physics`), the 5 s simulation — contacts, bounces, resting |
 
-The app adds **no format semantics of its own**: the fold, validation,
-branching and physics all come from the format's own Rust reference —
+The app adds **no format semantics of its own**: reading the log, the
+fold, the head, validation, branching and physics all come from the
+format's own Rust reference —
 the `openworldformat` crate, extracted into the spec repo's `rust/`
 (this app's arrival was the extraction's trigger) and ridden from
 crates.io.

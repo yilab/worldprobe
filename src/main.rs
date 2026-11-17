@@ -24,6 +24,10 @@ The read-only inspector for .world packages. PACKAGE is a package folder
 to open at start; without one, drop a folder on the window or type its
 path. An open package is read again whenever its files change.";
 
+/// What refuses or disagrees, and what only warns.
+const ERROR: egui::Color32 = egui::Color32::from_rgb(230, 120, 100);
+const WARNING: egui::Color32 = egui::Color32::from_rgb(220, 180, 100);
+
 fn main() -> eframe::Result {
     let mut args = std::env::args_os().skip(1);
     let package = args.next();
@@ -177,7 +181,7 @@ impl DiffView {
     fn for_package(package: &Package) -> Self {
         let mut points = vec![(DiffPoint::Base, "base".to_string())];
         for (n, entry) in package.entries.iter().enumerate() {
-            let id = entry.id.clone().unwrap_or_else(|| format!("line-{n}"));
+            let id = package.entry_id(n);
             let mark = if package.tips.contains(&id) {
                 "●"
             } else {
@@ -191,7 +195,7 @@ impl DiffView {
             DiffPoint::Manifest,
             "manifest.json (the head as written)".to_string(),
         ));
-        let head = package.head();
+        let head = package.head.clone();
         let from = head
             .as_deref()
             .and_then(|head| package.parent_of(head))
@@ -233,7 +237,7 @@ impl eframe::App for WorldProbe {
         });
         if let Some(error) = &self.error {
             egui::Panel::top("error").show(ui, |ui| {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 100), format!("⚠ {error}"));
+                ui.colored_label(ERROR, format!("⚠ {error}"));
             });
         }
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -330,6 +334,14 @@ impl WorldProbe {
         {
             self.selected_entry = None;
         }
+        if self.selected_tip.as_deref().is_some_and(|tip| {
+            package
+                .history
+                .as_ref()
+                .is_ok_and(|history| history.index_of(tip).is_none())
+        }) {
+            self.selected_tip = None;
+        }
         let mut diff = DiffView::for_package(&package);
         let exists = |point: &DiffPoint| diff.points.iter().any(|(p, _)| p == point);
         if exists(&self.diff.from) && exists(&self.diff.to) {
@@ -366,19 +378,35 @@ impl WorldProbe {
             ui.end_row();
             ui.label("Log entries");
             let mut line = package.entries.len().to_string();
-            if !package.torn_lines.is_empty() {
+            if let Some(torn) = package.torn_line {
                 line.push_str(&format!(
-                    " ({} torn/unparseable: {})",
-                    package.torn_lines.len(),
-                    package
-                        .torn_lines
-                        .iter()
-                        .map(|n| n.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    " · the torn last line ({torn}) skipped, as the spec allows"
                 ));
             }
             ui.label(line);
+            ui.end_row();
+            if let Some(corrupt) = &package.corrupt {
+                ui.label("Log");
+                ui.colored_label(
+                    ERROR,
+                    format!(
+                        "✗ {corrupt} — the {} entries above it are shown; nothing after it can be read",
+                        package.entries.len()
+                    ),
+                );
+                ui.end_row();
+            }
+            if let Err(error) = &package.history {
+                ui.label("History");
+                ui.colored_label(ERROR, format!("✗ not a tree: {error}"));
+                ui.end_row();
+            }
+            ui.label("Head");
+            ui.label(match &package.head {
+                None => "the base — there is no log".to_string(),
+                Some(head) if package.refs.get("main") == Some(head) => format!("{head} ← main"),
+                Some(head) => format!("{head} (the last entry; no main ref)"),
+            });
             ui.end_row();
             ui.label("Tours");
             ui.label(package.manifest.tours.len().to_string());
@@ -415,7 +443,7 @@ impl WorldProbe {
     }
 
     fn entities(ui: &mut egui::Ui, package: &Package) {
-        ui.label("The document at the last entry (the fold):");
+        ui.label("The document at the head (the fold of the path to it):");
         ui.add_space(4.0);
         let Ok(doc) = &package.fold else {
             ui.label("The fold refused — see Overview.");
@@ -499,7 +527,7 @@ impl WorldProbe {
         egui::Panel::left("entries").show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (n, entry) in package.entries.iter().enumerate() {
-                    let id = entry.id.clone().unwrap_or_else(|| format!("line-{n}"));
+                    let id = package.entry_id(n);
                     let summary = Package::op_summary(entry).join(" · ");
                     let is_tip = package.tips.contains(&id);
                     let label = format!("{} {} — {}", if is_tip { "●" } else { " " }, id, summary);
@@ -517,18 +545,21 @@ impl WorldProbe {
             *selected = Some(n);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let entry = &package.entries[n];
-                ui.heading(format!(
-                    "Entry {} (rev {})",
-                    entry.id.clone().unwrap_or_else(|| format!("line-{n}")),
-                    entry.revision
-                ));
+                let id = package.entry_id(n);
+                ui.heading(format!("Entry {id} (rev {})", entry.revision));
                 ui.label(format!(
                     "Author: {} · {} ms",
                     entry.author.name, entry.timestamp_ms
                 ));
-                if let Some(parent) = &entry.parent {
-                    ui.label(format!("Parent: {parent}"));
-                }
+                // The parent the history resolves — the entry's own, or
+                // the one before it — not only one the line spells out.
+                let parent = match &package.history {
+                    Ok(_) => package
+                        .parent_of(&id)
+                        .unwrap_or_else(|| "the base".to_string()),
+                    Err(_) => entry.parent.clone().unwrap_or_else(|| "—".to_string()),
+                };
+                ui.label(format!("Parent: {parent}"));
                 ui.add_space(6.0);
                 for line in Package::op_summary(entry) {
                     ui.monospace(line);
@@ -538,63 +569,59 @@ impl WorldProbe {
     }
 
     fn branches(ui: &mut egui::Ui, package: &Package, selected_tip: &mut Option<String>) {
+        let history = match &package.history {
+            Ok(history) => history,
+            Err(error) => {
+                ui.colored_label(ERROR, format!("✗ The log isn't a tree: {error}"));
+                return;
+            }
+        };
         ui.label(format!(
             "{} tips across {} entries — fold to any tip:",
             package.tips.len(),
             package.entries.len()
         ));
         ui.add_space(4.0);
-        fn walk(
-            ui: &mut egui::Ui,
-            package: &Package,
-            id: &str,
-            depth: usize,
-            selected: &mut Option<String>,
-        ) {
-            let refs: Vec<String> = package
-                .refs
-                .iter()
-                .filter(|(_, tip)| tip.as_str() == id)
-                .map(|(name, _)| name.clone())
-                .collect();
-            let is_tip = package.tips.iter().any(|t| t == id);
-            let indent = "    ".repeat(depth);
-            let mark = if is_tip { "●" } else { "├" };
-            let refs = if refs.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "  ← {}",
-                    refs.iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            let label = format!("{indent}{mark} {id}{refs}");
-            if ui
-                .selectable_label(selected.as_deref() == Some(id), label)
-                .clicked()
-            {
-                *selected = Some(id.to_string());
-            }
-            if let Some(children) = package.children.get(id) {
-                for child in children {
-                    walk(ui, package, child, depth + 1, selected);
-                }
-            }
-        }
         let mut selected = selected_tip.clone();
-        let roots: Vec<String> = package
-            .entries
+        // The entries that build on the base start the tree; a branch is
+        // indented where it forks, and a run of single children stays in
+        // its column, so a long linear log draws as one flat list.
+        let mut stack: Vec<(&str, usize)> = history
+            .ids()
             .iter()
-            .enumerate()
-            .filter(|(n, entry)| entry.parent.is_none() || *n == 0)
-            .map(|(n, entry)| entry.id.clone().unwrap_or_else(|| format!("line-{n}")))
+            .rev()
+            .map(String::as_str)
+            .filter(|id| history.parent_of(id).is_none())
+            .map(|id| (id, 0))
             .collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for root in &roots {
-                walk(ui, package, root, 0, &mut selected);
+            while let Some((id, depth)) = stack.pop() {
+                let refs: Vec<&str> = package
+                    .refs
+                    .iter()
+                    .filter(|(_, tip)| tip.as_str() == id)
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let mark = if package.tips.iter().any(|t| t == id) {
+                    "●"
+                } else {
+                    "├"
+                };
+                let refs = if refs.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ← {}", refs.join(", "))
+                };
+                let label = format!("{}{mark} {id}{refs}", "    ".repeat(depth));
+                if ui
+                    .selectable_label(selected.as_deref() == Some(id), label)
+                    .clicked()
+                {
+                    selected = Some(id.to_string());
+                }
+                let children = history.children_of(id);
+                let depth = if children.len() > 1 { depth + 1 } else { depth };
+                stack.extend(children.into_iter().rev().map(|child| (child, depth)));
             }
         });
         *selected_tip = selected.clone();
@@ -609,7 +636,7 @@ impl WorldProbe {
                     ));
                 }
                 Err(error) => {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 100), format!("✗ {error}"));
+                    ui.colored_label(ERROR, format!("✗ {error}"));
                 }
             }
         }
@@ -664,7 +691,7 @@ impl WorldProbe {
         if !package.undeclared.is_empty() {
             ui.add_space(4.0);
             ui.colored_label(
-                egui::Color32::from_rgb(220, 180, 100),
+                WARNING,
                 format!(
                     "⚠ carried, declared by no one: {}",
                     package.undeclared.join(", ")
@@ -751,7 +778,7 @@ impl WorldProbe {
         let diff = match result {
             Ok(diff) => diff,
             Err(error) => {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 100), format!("✗ {error}"));
+                ui.colored_label(ERROR, format!("✗ {error}"));
                 return;
             }
         };
@@ -845,8 +872,8 @@ impl WorldProbe {
     fn change_color(change: Change) -> egui::Color32 {
         match change {
             Change::Added => egui::Color32::from_rgb(120, 200, 120),
-            Change::Removed => egui::Color32::from_rgb(230, 120, 100),
-            Change::Changed => egui::Color32::from_rgb(220, 180, 100),
+            Change::Removed => ERROR,
+            Change::Changed => WARNING,
         }
     }
 }

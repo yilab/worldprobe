@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 
 use openworldformat as wt;
 use openworldformat::physics::{self as physics_ref, PhysicsWorld, SimOptions, Simulation};
-use openworldformat::session::SessionOp;
+use openworldformat::session::{SessionMeta, SessionOp};
 use openworldformat::state::{StateDoc, fold_state};
-use openworldformat::{EditOp, OpLogEntry, WorldDoc, fold_log, fold_path};
+use openworldformat::{EditOp, OpLogEntry, WorldDoc, fold_path};
 
-/// A loaded package: the base document, the log, the fold, the history,
-/// the state trajectory, the validation verdict, and — when the world
-/// declares bodies — a physics run.
+/// A loaded package: the base document, the log, its history, the fold
+/// to the head, the state trajectory, the validation verdict, and — when
+/// the world declares bodies — a physics run.
 pub struct Package {
     /// The directory this package was loaded from.
     pub dir: PathBuf,
@@ -22,11 +22,16 @@ pub struct Package {
     /// `manifest.json` as written: the head, the state at the tip of
     /// `main` (spec/package.md, "Head-first").
     pub manifest: wt::WorldManifest,
-    /// The session log (`ops.jsonl`), in file order. Torn trailing
-    /// lines are skipped and counted, per the spec's tolerance rule.
+    /// The session log (`ops.jsonl`) as the crate reads it, in file
+    /// order: every entry — or, when a line before the last doesn't
+    /// parse, the entries above that line.
     pub entries: Vec<OpLogEntry>,
-    /// Lines that wouldn't parse (torn tail, or corruption).
-    pub torn_lines: Vec<usize>,
+    /// The last line, numbered from 1, when it was torn and skipped.
+    pub torn_line: Option<usize>,
+    /// A line before the last that doesn't parse: the log is corrupt
+    /// there, and [`Package::entries`] stops above it. (Its `before` is
+    /// empty: those entries moved into `entries`.)
+    pub corrupt: Option<wt::CorruptLine>,
     /// The state declaration's initial values, from `state.json`.
     pub state_initial: BTreeMap<String, serde_json::Value>,
     /// The state declaration's field types, from `state.json`.
@@ -35,39 +40,29 @@ pub struct Package {
     pub state_values: BTreeMap<String, serde_json::Value>,
     /// State keys no declaration covers (carried, and said so).
     pub undeclared: Vec<String>,
-    /// Manifest-level validation issues (world-types' own rules).
+    /// Manifest-level validation issues (the crate's own rules).
     pub issues: Vec<wt::ValidationIssue>,
-    /// The document at the last entry, or why the fold refused.
+    /// The log read as a tree — identity, parents, children, tips — or
+    /// why it isn't one.
+    pub history: Result<wt::History, wt::HistoryError>,
+    /// The history's tips, in file order; empty when it isn't a tree.
+    pub tips: Vec<String>,
+    /// The head entry by the spec's rule — `refs.main`, else the last
+    /// entry — or `None` when there is no log and the base is the head.
+    pub head: Option<String>,
+    /// The document at the head — the fold of the path to it — or why
+    /// the fold refused.
     pub fold: Result<WorldDoc, String>,
     /// The base document — `snapshots/base.json`, the oldest state the
     /// log folds from, or the manifest itself when the package has no
     /// snapshot — for the fold and the per-tip folds.
     pub base: WorldDoc,
-    /// Entry id → children ids (branching histories).
-    pub children: BTreeMap<String, Vec<String>>,
-    /// Tips of the history (entries that are nobody's parent).
-    pub tips: Vec<String>,
     /// Named refs from `package.json` (ref → entry id).
     pub refs: BTreeMap<String, String>,
     /// The physics run, when the world declares bodies.
     pub physics: Option<Simulation>,
     /// Bodies the world declares (for the physics header).
     pub physics_world: PhysicsWorld,
-}
-
-/// The synthesized identity of one entry (`id`, `parent`): its own when
-/// present, else `line-<n>` and the previous entry — the same rule the
-/// fold applies, so a linear log is a chain in file order.
-fn identified(entries: &[OpLogEntry]) -> Vec<(String, Option<String>)> {
-    let mut out = Vec::with_capacity(entries.len());
-    let mut previous: Option<String> = None;
-    for (n, entry) in entries.iter().enumerate() {
-        let id = entry.id.clone().unwrap_or_else(|| format!("line-{n}"));
-        let parent = entry.parent.clone().or_else(|| previous.clone());
-        out.push((id.clone(), parent));
-        previous = Some(id);
-    }
-    out
 }
 
 /// The base document the log folds from: `snapshots/base.json` when the
@@ -101,20 +96,14 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         })?)
         .map_err(|e| format!("manifest.json: {e}"))?;
 
-    let mut entries = Vec::new();
-    let mut torn_lines = Vec::new();
-    if let Some(log) = read("ops.jsonl") {
-        for (n, line) in log.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str(line) {
-                Ok(entry) => entries.push(entry),
-                Err(_) if n + 1 == log.lines().count() => torn_lines.push(n + 1), // torn tail
-                Err(_) => torn_lines.push(n + 1),
-            }
-        }
-    }
+    // The crate reads the log as the spec says: a torn last line skipped
+    // and counted, an earlier bad line refused — with the entries above
+    // it, which are still worth showing.
+    let (entries, torn_line, corrupt) = match wt::decode_log(&read("ops.jsonl").unwrap_or_default())
+    {
+        Ok(log) => (log.entries, log.torn_line, None),
+        Err(mut corrupt) => (std::mem::take(&mut corrupt.before), None, Some(corrupt)),
+    };
 
     let state_doc: StateDoc = read("state.json")
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -146,22 +135,26 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         })
         .unwrap_or_default();
 
-    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (id, parent) in identified(&entries) {
-        if let Some(parent) = parent {
-            children.entry(parent).or_default().push(id);
-        }
-    }
-    // A tip is an entry nobody names as parent.
-    let tips: Vec<String> = identified(&entries)
-        .into_iter()
-        .map(|(id, _)| id)
-        .filter(|id| !children.contains_key(id))
-        .collect();
+    let history = wt::build_history(&entries);
+    let tips = history
+        .as_ref()
+        .map(|history| history.tips().into_iter().map(str::to_string).collect())
+        .unwrap_or_default();
+    // The head is the crate's rule over the refs package.json names.
+    let mut meta = SessionMeta::new(manifest.meta.name.as_str());
+    meta.refs = refs.clone();
+    let head = wt::main_tip(&meta, &entries);
 
     let issues = wt::validate_manifest(&manifest, &wt::WorldLimits::default());
     let base = base_doc(read(wt::package::BASE_SNAPSHOT).as_deref(), &manifest)?;
-    let fold = fold_log(&base, &entries).map_err(|e| e.to_string());
+    // The fold the head-first rule names: the path to the head, not every
+    // entry in file order — a fork's two branches never meet in one world.
+    let fold = match &head {
+        Some(head) => fold_path(&base, &entries, Some(head))
+            .map(|(doc, _)| doc)
+            .map_err(|e| e.to_string()),
+        None => Ok(base.clone()),
+    };
 
     let physics_world = physics_ref::collect_physics(&manifest);
     let physics = (!physics_world.dynamic.is_empty())
@@ -172,16 +165,18 @@ pub fn load(dir: &Path) -> Result<Package, String> {
         package_json,
         manifest,
         entries,
-        torn_lines,
+        torn_line,
+        corrupt,
         state_initial,
         state_types,
         state_values,
         undeclared,
         issues,
+        history,
+        tips,
+        head,
         fold,
         base,
-        children,
-        tips,
         refs,
         physics,
         physics_world,
@@ -223,26 +218,26 @@ impl Package {
         fold_path(&self.base, &self.entries, Some(tip)).map_err(|e| e.to_string())
     }
 
-    /// The head entry: the one `main` names when the log has it, else
-    /// the last entry in file order (spec/package.md, "Head-first");
-    /// `None` when the log is empty.
-    pub fn head(&self) -> Option<String> {
-        let ids = identified(&self.entries);
-        self.refs
-            .get("main")
-            .filter(|main| ids.iter().any(|(id, _)| id == *main))
-            .cloned()
-            .or_else(|| ids.last().map(|(id, _)| id.clone()))
+    /// An entry's parent by the crate's identity rule; `None` for the
+    /// entry that builds on the base, or when the log isn't a tree.
+    pub fn parent_of(&self, id: &str) -> Option<String> {
+        self.history
+            .as_ref()
+            .ok()?
+            .parent_of(id)
+            .map(str::to_string)
     }
 
-    /// An entry's parent by the fold's identity rule — its own, else the
-    /// previous entry in file order; `None` for a root, whose parent is
-    /// the base.
-    pub fn parent_of(&self, id: &str) -> Option<String> {
-        identified(&self.entries)
-            .into_iter()
-            .find(|(entry, _)| entry == id)
-            .and_then(|(_, parent)| parent)
+    /// The id of the `n`th entry in file order, as the history names it;
+    /// when the log isn't a tree, its own `id`, else its place.
+    pub fn entry_id(&self, n: usize) -> String {
+        self.history
+            .as_ref()
+            .ok()
+            .and_then(|history| history.id_at(n))
+            .map(str::to_string)
+            .or_else(|| self.entries.get(n).and_then(|entry| entry.id.clone()))
+            .unwrap_or_else(|| format!("entry {}", n + 1))
     }
 
     /// One line per op, classified — the log view's detail rows.

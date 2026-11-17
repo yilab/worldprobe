@@ -135,7 +135,10 @@ fn diffs_the_spec_examples_history() {
         "examples/the-drop-test",
     ] {
         let package = crate_load(&root.join(pkg));
-        let head = package.head().unwrap_or_else(|| panic!("{pkg}: no head"));
+        let head = package
+            .head
+            .clone()
+            .unwrap_or_else(|| panic!("{pkg}: no head"));
         let written = serde_json::to_value(&package.manifest).unwrap();
         let diff = diff_lib::diff_worlds(&world_at(&package, Some(&head)), &written);
         assert!(
@@ -248,6 +251,118 @@ fn keeps_a_behavior_kind_the_crate_does_not_know() {
         serde_json::json!([wobble]),
         "the kind writes back as it came"
     );
+}
+
+/// A package written here: an empty world as its own base, the log given,
+/// and `package.json` when given. No sibling needed.
+fn scratch(name: &str, log: &str, package_json: Option<&str>) -> PathBuf {
+    // Its own prefix: the tests run in parallel in one process, and the
+    // older ones above make directories of their own.
+    let dir =
+        std::env::temp_dir().join(format!("worldprobe-scratch-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch package dir");
+    let manifest = openworldformat::WorldDoc::new("probe").to_manifest();
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("manifest serializes"),
+    )
+    .expect("manifest.json");
+    std::fs::write(dir.join("ops.jsonl"), log).expect("ops.jsonl");
+    if let Some(text) = package_json {
+        std::fs::write(dir.join("package.json"), text).expect("package.json");
+    }
+    dir
+}
+
+/// One history-only entry: it folds to nothing, so the world needs no
+/// base snapshot.
+fn entry(revision: u64) -> String {
+    format!("{{\"revision\":{revision},\"ops\":[]}}\n")
+}
+
+#[test]
+fn reads_the_log_as_the_spec_says() {
+    // A torn last line loses only itself, and is counted.
+    let torn = scratch(
+        "torn",
+        &format!("{}{}{{\"revision\":3,\"op", entry(1), entry(2)),
+        None,
+    );
+    let package = crate_load(&torn);
+    let _ = std::fs::remove_dir_all(&torn);
+    assert_eq!(package.entries.len(), 2);
+    assert_eq!(package.torn_line, Some(3));
+    assert!(package.corrupt.is_none());
+    assert!(package.fold.is_ok());
+
+    // A bad line before the last is corruption: the entries above it are
+    // shown and the rest is not folded around it, as a hand-split reader
+    // used to.
+    let corrupt = scratch(
+        "corrupt",
+        &format!("{}{{\"revision\":2,\"op\n{}", entry(1), entry(3)),
+        None,
+    );
+    let package = crate_load(&corrupt);
+    let _ = std::fs::remove_dir_all(&corrupt);
+    assert_eq!(
+        package.entries.len(),
+        1,
+        "only the entry above the bad line"
+    );
+    assert_eq!(package.torn_line, None);
+    let line = package.corrupt.as_ref().expect("the corruption is named");
+    assert_eq!(line.line, 2);
+    assert!(
+        line.to_string()
+            .starts_with("line 2 of the log doesn't parse"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_head_is_mains_tip_and_a_dangling_main_says_so() {
+    // main names an entry the log doesn't hold: the head is what main
+    // says, and the fold to it refuses, naming it — not the last entry,
+    // quietly, as a hand-rolled head used to.
+    let dangling = scratch(
+        "main-elsewhere",
+        &format!("{}{}", entry(1), entry(2)),
+        Some(r#"{"format_version": 2, "name": "probe", "refs": {"main": "e9"}}"#),
+    );
+    let package = crate_load(&dangling);
+    let _ = std::fs::remove_dir_all(&dangling);
+    assert_eq!(package.head.as_deref(), Some("e9"));
+    let refused = package.fold.as_ref().expect_err("the fold refuses");
+    assert!(refused.contains("e9"), "{refused}");
+
+    // A parent the log doesn't hold: not a tree, and the fold refuses.
+    let orphan = scratch(
+        "orphan",
+        "{\"revision\":1,\"ops\":[],\"id\":\"e1\"}\n{\"revision\":2,\"ops\":[],\"id\":\"e2\",\"parent\":\"gone\"}\n",
+        None,
+    );
+    let package = crate_load(&orphan);
+    let _ = std::fs::remove_dir_all(&orphan);
+    assert!(
+        matches!(&package.history, Err(openworldformat::HistoryError::UnknownParent { parent, .. }) if parent == "gone"),
+        "{:?}",
+        package.history
+    );
+    assert!(package.tips.is_empty());
+    assert!(package.fold.is_err());
+
+    // The spec's castle: main keeps the garden, the variant digs the moat.
+    // The fold is main's path, never both branches in one world.
+    let Some(root) = sibling("openworldformat") else {
+        return;
+    };
+    let castle = crate_load(&root.join("examples/forked-exploration"));
+    assert_eq!(castle.head.as_deref(), Some("e3"));
+    let head = castle.fold.as_ref().expect("the castle folds");
+    assert!(head.get(102).is_some(), "the garden is on main");
+    assert!(head.get(103).is_none(), "the moat is on the variant only");
 }
 
 // The package module lives in the binary; the test needs it as a lib.
