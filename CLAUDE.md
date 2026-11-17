@@ -7,9 +7,9 @@ Guidance for Claude Code when working in this repository.
 worldprobe — the read-only desktop inspector for Open World Format
 `.world` packages (fold, validate, history/branches, diff, state,
 physics). egui frontend over the `openworldformat` crate from crates.io
-(`0.5.1`; a `[patch.crates-io]` entry pointing at
-`../openworldformat/rust/` builds against the sibling checkout instead —
-committed while 0.5.1 is unpublished, and removed once it is).
+(`0.5.1`; a local `[patch.crates-io]` entry pointing at
+`../openworldformat/rust/` builds against the sibling checkout when
+wanted, and is never committed: CI has no sibling).
 
 ## Rules
 
